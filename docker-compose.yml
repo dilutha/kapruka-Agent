@@ -1,0 +1,126 @@
+# docker-compose.yml
+# =====================================================================
+# Local Development Stack
+# Run: docker compose up -d
+# =====================================================================
+
+version: '3.9'
+
+services:
+  # ── PostgreSQL (Supabase-compatible) ───────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: kapruka_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     kapruka
+      POSTGRES_PASSWORD: kapruka_dev_password
+      POSTGRES_DB:       kapruka_dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test:     ['CMD-SHELL', 'pg_isready -U kapruka -d kapruka_dev']
+      interval: 5s
+      timeout:  3s
+      retries:  10
+
+  # ── Redis ──────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: kapruka_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:     ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      retries:  5
+
+  # ── NestJS Backend ─────────────────────────────────────────────────
+  backend:
+    build:
+      context:    ./backend
+      dockerfile: Dockerfile
+      target:     builder          # Use builder stage in dev for hot reload
+    container_name: kapruka_backend
+    restart: unless-stopped
+    command: yarn start:dev
+    volumes:
+      - ./backend/src:/app/src:ro  # Hot reload source
+    ports:
+      - '3001:3001'
+    environment:
+      NODE_ENV:               development
+      DATABASE_URL:           postgresql://kapruka:kapruka_dev_password@postgres:5432/kapruka_dev
+      DIRECT_URL:             postgresql://kapruka:kapruka_dev_password@postgres:5432/kapruka_dev
+      REDIS_URL:              redis://redis:6379
+      KAPRUKA_MCP_SERVER_URL: ${KAPRUKA_MCP_SERVER_URL}
+      OPENAI_API_KEY:         ${OPENAI_API_KEY}
+      CLERK_SECRET_KEY:       ${CLERK_SECRET_KEY}
+      GUEST_TOKEN_SECRET:     ${GUEST_TOKEN_SECRET}
+      NEXTJS_URL:             http://localhost:3000
+      CORS_ALLOWED_ORIGINS:   http://localhost:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:     ['CMD', 'wget', '-qO-', 'http://localhost:3001/health']
+      interval: 15s
+      timeout:  5s
+      retries:  5
+      start_period: 30s
+
+  # ── Next.js Frontend ───────────────────────────────────────────────
+  frontend:
+    build:
+      context:    ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: kapruka_frontend
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+    environment:
+      NEXT_PUBLIC_API_URL:             http://localhost:3001
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY}
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ── Redis Commander (dev UI) ───────────────────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: kapruka_redis_ui
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - '8081:8081'
+    profiles: [tools]  # Only starts with: docker compose --profile tools up
+
+  # ── Adminer (DB UI) ────────────────────────────────────────────────
+  adminer:
+    image: adminer:latest
+    container_name: kapruka_adminer
+    restart: unless-stopped
+    ports:
+      - '8080:8080'
+    profiles: [tools]
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: kapruka_network
