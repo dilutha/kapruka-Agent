@@ -4,6 +4,8 @@
   "workspaces": ["backend", "frontend"],
   "scripts": {
     "dev": "concurrently \"yarn workspace backend dev\" \"yarn workspace frontend dev\"",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
     "test": "yarn workspace backend test",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down"

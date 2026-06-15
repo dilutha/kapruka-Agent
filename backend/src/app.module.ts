@@ -23,18 +23,12 @@ import { redisConfig } from './config/redis.config';
 import { aiConfig } from './config/ai.config';
 
 // Infrastructure
-import { PrismaModule } from './infrastructure/prisma/prisma.module';
-import { RedisModule } from './infrastructure/redis/redis.module';
+import { PrismaModule } from './prisma/prisma.module';
+import { RedisModule } from './redis/redis.module';
 
 // Feature modules
-import { AuthModule } from './modules/auth/auth.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { ProductModule } from './modules/product/product.module';
-import { CartModule } from './modules/cart/cart.module';
-import { OrderModule } from './modules/order/order.module';
-import { DeliveryModule } from './modules/delivery/delivery.module';
-import { GiftModule } from './modules/gift/gift.module';
-import { TrackingModule } from './modules/tracking/tracking.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 
 // AI layer
@@ -42,7 +36,6 @@ import { AgentModule } from './ai/agent/agent.module';
 import { McpModule } from './mcp/mcp.module';
 
 // Common
-import { LoggingModule } from './common/logging/logging.module';
 import { HealthModule } from './common/health/health.module';
 
 @Module({
@@ -85,7 +78,6 @@ import { HealthModule } from './common/health/health.module';
     // Infrastructure
     PrismaModule,
     RedisModule,
-    LoggingModule,
     HealthModule,
 
     // AI + MCP
@@ -93,14 +85,8 @@ import { HealthModule } from './common/health/health.module';
     AgentModule,
 
     // Feature modules
-    AuthModule,
     ChatModule,
     ProductModule,
-    CartModule,
-    OrderModule,
-    DeliveryModule,
-    GiftModule,
-    TrackingModule,
     AnalyticsModule,
   ],
 })

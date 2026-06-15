@@ -17,6 +17,9 @@
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "node",
+    "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
+    "types": ["node", "jest"],
     "paths": {
       "@/*": ["src/*"]
     }

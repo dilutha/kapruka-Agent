@@ -16,18 +16,13 @@
 // ============================================================
 
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["fullTextSearch", "postgresqlExtensions"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
-  provider   = "postgresql"
-  url        = env("DATABASE_URL")
-  directUrl  = env("DIRECT_URL")
-  extensions = [
-    uuidOssp(map: "uuid-ossp"),   // uuid_generate_v4()
-    pgTrgm(map: "pg_trgm")        // trigram search on product names
-  ]
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // ============================================================

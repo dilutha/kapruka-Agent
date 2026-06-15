@@ -170,7 +170,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   async deletePattern(pattern: string): Promise<number> {
     if (!this.isConnected) return 0;
-    let cursor = 0;
+    let cursor = '0';
     let deletedCount = 0;
 
     do {
@@ -184,7 +184,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         await this.client.del(result.keys);
         deletedCount += result.keys.length;
       }
-    } while (cursor !== 0);
+    } while (cursor !== '0');
 
     this.logger.log(`Deleted ${deletedCount} keys matching ${pattern}`);
     return deletedCount;
