@@ -548,32 +548,26 @@ npm run dev
 
 ---
 
-# 🎓 Academic Purpose
 
-This project was developed as a **Final Year Undergraduate Project** to demonstrate:
-
-- Full-Stack Web Development
-- Artificial Intelligence Integration
-- Conversational Commerce
-- Large Language Models (LLMs)
-- Modern Software Architecture
-- Cloud Database Management
-- AI Workflow Orchestration
-- User Experience Design
-- API Integration
-- Performance Optimization
-
----
 
 # 👨‍💻 Author
 
 **Dilutha Weerasinghe**
 
-Undergraduate
+### Education
 
-Business Information Systems (Special)
+🎓 **MSc Applied Artificial Intelligence** *(Reading)*  
+**University of Westminster** *(Informatics Institute of Technology - IIT)*
 
-University of Sri Jayewardenepura
+🎓 **BSc (Hons) Business Information Systems (Special)** *(Undergraduate)*  
+**University of Sri Jayewardenepura**
+
+🎓 **BSc (Hons) Data Science**  
+**Cardiff Metropolitan University**
+
+---
+
+This project was developed as part of my academic journey, combining expertise in **Artificial Intelligence, Data Science, Business Information Systems, Full-Stack Software Engineering, and Conversational AI** to build a modern AI-powered e-commerce shopping assistant.
 
 ---
 
