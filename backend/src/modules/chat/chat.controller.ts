@@ -7,11 +7,16 @@
  *  - Language-aware request handling
  *
  * Routes:
- *  POST /chats              — create new chat session
- *  GET  /chats              — list user's chat history
- *  GET  /chats/:id          — get single chat with messages
- *  POST /chats/:id/messages — send message, stream response
- *  DELETE /chats/:id        — archive chat
+ *  POST   /chats                — create new chat session
+ *  GET    /chats                — list user's chat history (?archived=true for archived)
+ *  GET    /chats/:id            — get single chat with messages
+ *  PATCH  /chats/:id            — rename chat
+ *  PATCH  /chats/:id/pin        — pin/unpin chat
+ *  POST   /chats/:id/archive    — archive chat (recoverable)
+ *  POST   /chats/:id/unarchive  — restore an archived chat
+ *  POST   /chats/:id/duplicate  — duplicate chat + its messages
+ *  POST   /chats/:id/messages   — send message, stream response
+ *  DELETE /chats/:id            — soft-delete chat (not recoverable via UI)
  */
 
 import {
@@ -23,7 +28,10 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  ParseBoolPipe,
+  Patch,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -40,15 +48,18 @@ import { Response } from 'express';
 import { ChatService } from './chat.service';
 import { CreateChatDto } from './dto/create-chat.dto';
 import { SendMessageDto } from './dto/send-message.dto';
+import { UpdateChatDto } from './dto/update-chat.dto';
+import { PinChatDto } from './dto/pin-chat.dto';
 import { ChatResponseDto } from './dto/chat-response.dto';
 import { OptionalAuthGuard } from '../auth/guards/optional-auth.guard';
 import { LoggingInterceptor } from '../../common/interceptors/logging.interceptor';
 import { RequestWithUser } from '../auth/interfaces/request-with-user.interface';
+import { PromptInjectionGuard } from '../../common/security/security.middleware';
 
 @ApiTags('Chat')
 @ApiSecurity('bearer')
 @UseInterceptors(LoggingInterceptor)
-@UseGuards(OptionalAuthGuard) // Works for both authed and guest users
+@UseGuards(OptionalAuthGuard, PromptInjectionGuard) // Works for both authed and guest users
 @Controller('chats')
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
@@ -71,10 +82,15 @@ export class ChatController {
   @Get()
   @ApiOperation({ summary: 'List all chats for current user' })
   @ApiResponse({ status: 200, type: [ChatResponseDto] })
-  async listChats(@Req() req: RequestWithUser): Promise<ChatResponseDto[]> {
+  async listChats(
+    @Req() req: RequestWithUser,
+    @Query('archived', new ParseBoolPipe({ optional: true }))
+    archived?: boolean,
+  ): Promise<ChatResponseDto[]> {
     return this.chatService.listChats({
       userId: req.user?.id,
       guestUserId: req.guestUser?.id,
+      archived,
     });
   }
 
@@ -86,6 +102,81 @@ export class ChatController {
     @Req() req: RequestWithUser,
   ): Promise<ChatResponseDto> {
     return this.chatService.getChat({
+      chatId,
+      userId: req.user?.id,
+      guestUserId: req.guestUser?.id,
+    });
+  }
+
+  @Patch(':id')
+  @ApiOperation({ summary: 'Rename a chat' })
+  @ApiResponse({ status: 200, type: ChatResponseDto })
+  async renameChat(
+    @Param('id', ParseUUIDPipe) chatId: string,
+    @Body() dto: UpdateChatDto,
+    @Req() req: RequestWithUser,
+  ): Promise<ChatResponseDto> {
+    return this.chatService.renameChat({
+      chatId,
+      dto,
+      userId: req.user?.id,
+      guestUserId: req.guestUser?.id,
+    });
+  }
+
+  @Patch(':id/pin')
+  @ApiOperation({ summary: 'Pin or unpin a chat' })
+  @ApiResponse({ status: 200, type: ChatResponseDto })
+  async setPinned(
+    @Param('id', ParseUUIDPipe) chatId: string,
+    @Body() dto: PinChatDto,
+    @Req() req: RequestWithUser,
+  ): Promise<ChatResponseDto> {
+    return this.chatService.setPinned({
+      chatId,
+      isPinned: dto.isPinned,
+      userId: req.user?.id,
+      guestUserId: req.guestUser?.id,
+    });
+  }
+
+  @Post(':id/archive')
+  @ApiOperation({ summary: 'Archive a chat (recoverable)' })
+  @ApiResponse({ status: 200, type: ChatResponseDto })
+  async archiveChat(
+    @Param('id', ParseUUIDPipe) chatId: string,
+    @Req() req: RequestWithUser,
+  ): Promise<ChatResponseDto> {
+    return this.chatService.archiveChat({
+      chatId,
+      userId: req.user?.id,
+      guestUserId: req.guestUser?.id,
+    });
+  }
+
+  @Post(':id/unarchive')
+  @ApiOperation({ summary: 'Restore an archived chat' })
+  @ApiResponse({ status: 200, type: ChatResponseDto })
+  async unarchiveChat(
+    @Param('id', ParseUUIDPipe) chatId: string,
+    @Req() req: RequestWithUser,
+  ): Promise<ChatResponseDto> {
+    return this.chatService.unarchiveChat({
+      chatId,
+      userId: req.user?.id,
+      guestUserId: req.guestUser?.id,
+    });
+  }
+
+  @Post(':id/duplicate')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Duplicate a chat and its messages' })
+  @ApiResponse({ status: 201, type: ChatResponseDto })
+  async duplicateChat(
+    @Param('id', ParseUUIDPipe) chatId: string,
+    @Req() req: RequestWithUser,
+  ): Promise<ChatResponseDto> {
+    return this.chatService.duplicateChat({
       chatId,
       userId: req.user?.id,
       guestUserId: req.guestUser?.id,
@@ -131,12 +222,12 @@ export class ChatController {
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Archive chat session' })
+  @ApiOperation({ summary: 'Delete chat session' })
   async deleteChat(
     @Param('id', ParseUUIDPipe) chatId: string,
     @Req() req: RequestWithUser,
   ): Promise<void> {
-    await this.chatService.archiveChat({
+    await this.chatService.deleteChat({
       chatId,
       userId: req.user?.id,
       guestUserId: req.guestUser?.id,

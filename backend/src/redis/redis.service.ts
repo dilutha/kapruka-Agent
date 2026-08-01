@@ -27,7 +27,12 @@
  *  Write-through for session and agent state (write must not fail silently).
  */
 
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, RedisClientType } from 'redis';
 import * as crypto from 'crypto';
@@ -35,14 +40,14 @@ import * as crypto from 'crypto';
 // ─── Cache TTLs (seconds) ─────────────────────────────────────────────────────
 
 export const TTL = {
-  PRODUCT_SEARCH:      30 * 60,    // 30 minutes
-  PRODUCT_DETAIL:      60 * 60,    // 1 hour
-  PRODUCT_RECS:        20 * 60,    // 20 minutes
-  AGENT_STATE:         10 * 60,    // 10 minutes
-  LANG_DETECT:         60 * 60,    // 1 hour
-  GUEST_SESSION:       72 * 3600,  // 3 days
-  ORDER_TRACKING:       5 * 60,    // 5 minutes
-  DELIVERY_SLOTS:      15 * 60,    // 15 minutes
+  PRODUCT_SEARCH: 30 * 60, // 30 minutes
+  PRODUCT_DETAIL: 60 * 60, // 1 hour
+  PRODUCT_RECS: 20 * 60, // 20 minutes
+  AGENT_STATE: 10 * 60, // 10 minutes
+  LANG_DETECT: 60 * 60, // 1 hour
+  GUEST_SESSION: 72 * 3600, // 3 days
+  ORDER_TRACKING: 5 * 60, // 5 minutes
+  DELIVERY_SLOTS: 15 * 60, // 15 minutes
 } as const;
 
 // ─── Cache key builders ───────────────────────────────────────────────────────
@@ -83,15 +88,17 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       url: this.config.getOrThrow<string>('redis.url'),
       socket: {
         reconnectStrategy: (retries) => {
-          if (retries > 10) return new Error('Max Redis reconnection attempts exceeded');
+          if (retries > 10)
+            return new Error('Max Redis reconnection attempts exceeded');
           return Math.min(retries * 100, 3000);
         },
         connectTimeout: 5000,
       },
-    }) as RedisClientType;
+    });
 
-    this.client.on('error', (err) => {
-      this.logger.error('Redis error:', err.message);
+    this.client.on('error', (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error('Redis error:', message);
       this.isConnected = false;
     });
 
@@ -175,8 +182,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     do {
       const result = await this.client.scan(cursor, {
-        MATCH:  pattern,
-        COUNT:  100,
+        MATCH: pattern,
+        COUNT: 100,
       });
       cursor = result.cursor;
 
@@ -192,15 +199,42 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Typed cache helpers ─────────────────────────────────────────────────────
 
-  async getJson<T>(key: string): Promise<T | null> {
+  /**
+   * Reads and decodes a JSON-encoded cache entry.
+   *
+   * Pass a `validate` function (e.g. `(v) => schema.safeParse(v).data ?? null`)
+   * whenever the cached shape can outlive a deploy — a cache entry written by a
+   * previous version of the code is untrusted input. Without it, `T` is an
+   * unchecked assertion about bytes that came back from Redis.
+   *
+   * Entries that fail to decode *or* fail validation are evicted, so the next
+   * read is a clean miss rather than a permanently poisoned key.
+   */
+  async getJson<T>(
+    key: string,
+    validate?: (value: unknown) => T | null,
+  ): Promise<T | null> {
     const raw = await this.get(key);
     if (!raw) return null;
+
+    let parsed: unknown;
     try {
-      return JSON.parse(raw) as T;
+      parsed = JSON.parse(raw);
     } catch {
       await this.del(key); // Corrupted value — evict
       return null;
     }
+
+    if (validate) {
+      const validated = validate(parsed);
+      if (validated === null) {
+        this.logger.warn(`Evicting cache entry with unexpected shape: ${key}`);
+        await this.del(key);
+      }
+      return validated;
+    }
+
+    return parsed as T;
   }
 
   async setJson<T>(key: string, value: T, ttlSeconds: number): Promise<void> {
@@ -224,8 +258,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     key: string,
     ttlSeconds: number,
     loader: () => Promise<T>,
+    validate?: (value: unknown) => T | null,
   ): Promise<T> {
-    const cached = await this.getJson<T>(key);
+    const cached = await this.getJson<T>(key, validate);
     if (cached !== null) return cached;
 
     const value = await loader();

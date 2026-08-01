@@ -15,8 +15,19 @@
 'use client';
 
 import { useCallback, useRef } from 'react';
-import { useKaprukStore, Product } from '@/stores/kapruk.store';
+import { useKaprukStore, Product, CheckoutInfo } from '@/stores/kapruk.store';
 import { apiClient } from '@/lib/api-client';
+import {
+  getFriendlyErrorMessage,
+  getFriendlySseErrorMessage,
+  isAbortError,
+} from '@/lib/errors';
+
+// Overall ceiling for a single message's request+stream lifetime. Guards
+// against a stalled connection that never errors and never sends another
+// byte (a dead proxy, a silently dropped connection) — without this, such a
+// stall would leave the UI stuck on "streaming" forever.
+const STREAM_TIMEOUT_MS = 45_000;
 
 interface SendMessageOptions {
   chatId: string;
@@ -35,6 +46,7 @@ export function useChatStream(): UseStreamReturn {
     updateStreamingMessage,
     finalizeStreamingMessage,
     appendProductsToMessage,
+    setMessageCheckoutInfo,
     setStreaming,
     setError,
   } = useKaprukStore();
@@ -79,13 +91,17 @@ export function useChatStream(): UseStreamReturn {
         return;
       }
 
+      if (event === 'checkout_ready' && isCheckoutInfo(data)) {
+        setMessageCheckoutInfo(chatId, messageId, data);
+        return;
+      }
+
       if (event === 'error') {
-        const message =
-          typeof data.message === 'string' ? data.message : 'An error occurred';
+        const message = getFriendlySseErrorMessage(data.code, data.message);
         updateStreamingMessage(chatId, messageId, `\n\n⚠️ ${message}`);
       }
     },
-    [appendProductsToMessage, updateStreamingMessage],
+    [appendProductsToMessage, setMessageCheckoutInfo, updateStreamingMessage],
   );
 
   const sendMessage = useCallback(
@@ -94,6 +110,15 @@ export function useChatStream(): UseStreamReturn {
       abortControllerRef.current?.abort();
       const controller = new AbortController();
       abortControllerRef.current = controller;
+
+      // Distinguishes "the user pressed cancel" (finalize silently, current
+      // behavior) from "we gave up waiting" (finalize with a friendly
+      // timeout message) — both surface as the same AbortError otherwise.
+      let timedOut = false;
+      const timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, STREAM_TIMEOUT_MS);
 
       // Optimistically add user message
       const userMessageId = crypto.randomUUID();
@@ -119,6 +144,20 @@ export function useChatStream(): UseStreamReturn {
 
       const accumulatedProducts: Product[] = [];
 
+      // The cart lives only in the browser (Zustand/localStorage) — the
+      // backend has no server-side cart of its own — so a fresh snapshot
+      // rides along with every message. This is what lets checkout.node.ts
+      // know what's actually in the cart instead of always seeing it empty.
+      // Read via getState() (not a subscribed hook value) so this callback
+      // doesn't need `items` in its dependency array just to see it once at
+      // send time.
+      const cartItems = useKaprukStore.getState().items.map((item) => ({
+        kaprukaProdId: item.kaprukaProdId,
+        name: item.name,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+      }));
+
       try {
         const response = await fetch(
           `${apiClient.baseUrl}/chats/${chatId}/messages`,
@@ -126,9 +165,9 @@ export function useChatStream(): UseStreamReturn {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              ...apiClient.getAuthHeaders(),
+              ...(await apiClient.getAuthHeaders()),
             },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({ content, cartItems }),
             signal: controller.signal,
           },
         );
@@ -136,6 +175,8 @@ export function useChatStream(): UseStreamReturn {
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
+
+        apiClient.captureGuestToken(response.headers);
 
         if (!response.body) {
           throw new Error('No response body');
@@ -187,25 +228,38 @@ export function useChatStream(): UseStreamReturn {
           accumulatedProducts.length > 0 ? accumulatedProducts : undefined,
         );
       } catch (error) {
-        if ((error as Error).name === 'AbortError') {
-          // User cancelled — finalize with what we have
-          finalizeStreamingMessage(chatId, assistantMessageId);
+        if (isAbortError(error)) {
+          if (timedOut) {
+            const timeoutMessage =
+              'The request timed out. Please try again.';
+            updateStreamingMessage(
+              chatId,
+              assistantMessageId,
+              `\n\n⚠️ ${timeoutMessage}`,
+            );
+            finalizeStreamingMessage(chatId, assistantMessageId);
+            setError(timeoutMessage);
+          } else {
+            // User cancelled — finalize silently with what we have.
+            finalizeStreamingMessage(chatId, assistantMessageId);
+          }
           return;
         }
 
-        const errorMessage = getLocalizedErrorMessage(error);
+        const errorMessage = getFriendlyErrorMessage(error);
         updateStreamingMessage(chatId, assistantMessageId, `\n\n⚠️ ${errorMessage}`);
         finalizeStreamingMessage(chatId, assistantMessageId);
         setError(errorMessage);
 
         console.error('Stream error:', error);
+      } finally {
+        clearTimeout(timeoutTimer);
       }
     },
     [
       addMessage,
       updateStreamingMessage,
       finalizeStreamingMessage,
-      appendProductsToMessage,
       setStreaming,
       setError,
       handleSseEvent,
@@ -233,17 +287,18 @@ function isProduct(value: unknown): value is Product {
   );
 }
 
-// ─── Error message localizer ───────────────────────────────────────────────────
-
-function getLocalizedErrorMessage(error: unknown): string {
-  if (error instanceof TypeError && error.message.includes('fetch')) {
-    return 'Network error — please check your connection and try again.';
+function isCheckoutInfo(value: unknown): value is CheckoutInfo {
+  if (!isRecord(value)) return false;
+  if (typeof value.orderRef !== 'string' || typeof value.checkoutUrl !== 'string') {
+    return false;
   }
-  if (error instanceof Error && error.message.includes('HTTP 429')) {
-    return 'Too many messages — please wait a moment before sending another.';
-  }
-  if (error instanceof Error && error.message.includes('HTTP 503')) {
-    return 'The assistant is temporarily unavailable. Please try again shortly.';
-  }
-  return 'Something went wrong. Please try again.';
+  const summary = value.summary;
+  return (
+    isRecord(summary) &&
+    typeof summary.itemsTotal === 'number' &&
+    typeof summary.deliveryFee === 'number' &&
+    typeof summary.addonsTotal === 'number' &&
+    typeof summary.grandTotal === 'number' &&
+    typeof summary.currency === 'string'
+  );
 }

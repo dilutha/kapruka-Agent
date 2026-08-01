@@ -2,20 +2,20 @@ import {
   CanActivate,
   ExecutionContext,
   Injectable,
+  Logger,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { verifyToken } from '@clerk/backend';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 
 import { PrismaService } from '../../../prisma/prisma.service';
 import { GuestTokenService } from '../../../common/security/security.config';
-
-interface AuthenticatedRequest extends Request {
-  user?: unknown;
-  guestUser?: unknown;
-}
+import { RequestWithUser } from '../interfaces/request-with-user.interface';
 
 @Injectable()
 export class OptionalAuthGuard implements CanActivate {
+  private readonly logger = new Logger(OptionalAuthGuard.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly guestTokenService: GuestTokenService,
@@ -24,41 +24,51 @@ export class OptionalAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const http = context.switchToHttp();
 
-    const request = http.getRequest<AuthenticatedRequest>();
+    const request = http.getRequest<RequestWithUser>();
     const response = http.getResponse<Response>();
 
     const authHeader = request.headers.authorization;
     const guestToken = request.headers['x-guest-token'];
 
     // Attempt Clerk authentication
-    if (
-      typeof authHeader === 'string' &&
-      authHeader.startsWith('Bearer ')
-    ) {
+    if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
       const token = authHeader.slice(7);
 
       try {
         const secretKey = process.env.CLERK_SECRET_KEY;
 
-        if (secretKey) {
-          const payload = await verifyToken(token, {
-            secretKey,
+        if (!secretKey) {
+          throw new UnauthorizedException(
+            'Clerk authentication is not configured',
+          );
+        }
+
+        const payload = (await verifyToken(token, {
+          secretKey,
+        })) as unknown;
+        const clerkId = getClerkSubject(payload);
+
+        if (clerkId) {
+          const user = await this.prisma.user.findUnique({
+            where: {
+              clerkId,
+            },
           });
 
-          if (payload.sub) {
-            const user = await this.prisma.user.findUnique({
-              where: {
-                clerkId: payload.sub,
-              },
-            });
-
-            if (user) {
-              request.user = user;
-            }
+          if (user) {
+            request.user = user;
+          } else {
+            throw new UnauthorizedException(
+              'Authenticated user is not registered',
+            );
           }
         }
-      } catch {
-        // Invalid or expired token; continue as guest
+      } catch (error) {
+        this.logger.warn('Rejected invalid Clerk bearer token');
+        this.logger.debug(error);
+        throw new UnauthorizedException(
+          'Invalid or expired authentication token',
+        );
       }
     }
 
@@ -104,3 +114,11 @@ export class OptionalAuthGuard implements CanActivate {
   }
 }
 
+function getClerkSubject(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null || !('sub' in payload)) {
+    return null;
+  }
+
+  const subject = payload.sub;
+  return typeof subject === 'string' ? subject : null;
+}

@@ -5,12 +5,12 @@
  *
  *  STT (Speech-to-Text):
  *    - Browser Web Speech API (SpeechRecognition) for low-latency local recognition
- *    - Fallback to OpenAI Whisper API for unsupported browsers / Sinhala accuracy
+ *    - Optional backend transcription endpoint for unsupported browsers
  *    - Voice Activity Detection via AudioWorklet (silence threshold: 500ms)
  *    - Language hints: 'en-US', 'si-LK', 'en-LK' (Singlish uses en-LK)
  *
  *  TTS (Text-to-Speech):
- *    - OpenAI TTS API (alloy voice) via backend streaming endpoint
+ *    - Optional backend speech endpoint
  *    - Browser SpeechSynthesis API as fallback
  *    - Auto-cancels on new user input
  *
@@ -43,7 +43,7 @@ interface UseVoiceReturn {
 
 const SPEECH_LANG_MAP: Record<Language, string> = {
   EN: 'en-US',
-  SI: 'si-LK',       // Sinhala — limited browser support, uses Whisper fallback
+  SI: 'si-LK',       // Sinhala browser support is limited; backend fallback may help
   SINGLISH: 'en-LK', // Sri Lankan English
 };
 
@@ -72,7 +72,7 @@ interface SpeechRecognitionWindow extends Window {
   webkitSpeechRecognition?: new () => BrowserSpeechRecognition;
 }
 
-async function transcribeWithWhisper(
+async function transcribeWithBackend(
   audioBlob: Blob,
   lang: Language,
 ): Promise<string> {
@@ -82,7 +82,7 @@ async function transcribeWithWhisper(
 
   const response = await fetch(`${apiClient.baseUrl}/voice/transcribe`, {
     method: 'POST',
-    headers: apiClient.getAuthHeaders(),
+    headers: await apiClient.getAuthHeaders(),
     body: formData,
   });
 
@@ -115,11 +115,12 @@ export function useVoice(): UseVoiceReturn {
   // ─── Cleanup ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
+    const silenceTimer = silenceTimerRef.current;
     return () => {
       recognitionRef.current?.stop();
       mediaRecorderRef.current?.stop();
       audioRef.current?.pause();
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (silenceTimer) clearTimeout(silenceTimer);
     };
   }, []);
 
@@ -175,9 +176,9 @@ export function useVoice(): UseVoiceReturn {
     });
   }, [language]);
 
-  // ─── STT: Whisper API fallback (for Sinhala or unsupported browsers) ────────
+  // ─── STT: Backend transcription fallback ───────────────────────────────────
 
-  const startWhisperRecording = useCallback((): Promise<string> => {
+  const startBackendRecording = useCallback((): Promise<string> => {
     return new Promise(async (resolve, reject) => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -198,7 +199,7 @@ export function useVoice(): UseVoiceReturn {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
 
           try {
-            const text = await transcribeWithWhisper(audioBlob, language);
+            const text = await transcribeWithBackend(audioBlob, language);
             resolve(text);
           } catch (err) {
             reject(err);
@@ -217,6 +218,16 @@ export function useVoice(): UseVoiceReturn {
     });
   }, [language]);
 
+  // ─── Cancel speaking ─────────────────────────────────────────────────────────
+
+  const cancelSpeaking = useCallback((): void => {
+    audioRef.current?.pause();
+    if (typeof window !== 'undefined') {
+      window.speechSynthesis?.cancel();
+    }
+    if (state === 'speaking') setState('idle');
+  }, [state]);
+
   // ─── Start listening ─────────────────────────────────────────────────────────
 
   const startListening = useCallback(async () => {
@@ -231,9 +242,9 @@ export function useVoice(): UseVoiceReturn {
     try {
       let text: string;
 
-      // Use Whisper for Sinhala (better accuracy) or unsupported browsers
+      // Use backend transcription for Sinhala or unsupported browsers.
       if (language === 'SI' || !isSupported) {
-        text = await startWhisperRecording();
+        text = await startBackendRecording();
       } else {
         text = await startWebSpeech();
       }
@@ -250,7 +261,15 @@ export function useVoice(): UseVoiceReturn {
       // Auto-clear error after 3s
       setTimeout(() => setState('idle'), 3000);
     }
-  }, [state, language, isSupported, startWebSpeech, startWhisperRecording]);
+  }, [
+    state,
+    language,
+    isSupported,
+    setRecording,
+    startWebSpeech,
+    startBackendRecording,
+    cancelSpeaking,
+  ]);
 
   // ─── Stop listening ──────────────────────────────────────────────────────────
 
@@ -259,7 +278,7 @@ export function useVoice(): UseVoiceReturn {
     mediaRecorderRef.current?.stop();
     setState('idle');
     setRecording(false);
-  }, []);
+  }, [setRecording]);
 
   // ─── TTS: Speak text ─────────────────────────────────────────────────────────
 
@@ -272,17 +291,17 @@ export function useVoice(): UseVoiceReturn {
       setState('speaking');
 
       try {
-        // Try OpenAI TTS via backend
+        // Try backend speech endpoint first.
         const response = await fetch(`${apiClient.baseUrl}/voice/speak`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...apiClient.getAuthHeaders(),
+            ...(await apiClient.getAuthHeaders()),
           },
           body: JSON.stringify({
-            text: text.slice(0, 4096), // OpenAI TTS limit
+            text: text.slice(0, 4096),
             language,
-            voice: 'alloy',
+            voice: 'default',
           }),
         });
 
@@ -318,18 +337,8 @@ export function useVoice(): UseVoiceReturn {
         }
       }
     },
-    [language],
+    [language, cancelSpeaking],
   );
-
-  // ─── Cancel speaking ─────────────────────────────────────────────────────────
-
-  function cancelSpeaking(): void {
-    audioRef.current?.pause();
-    if (typeof window !== 'undefined') {
-      window.speechSynthesis?.cancel();
-    }
-    if (state === 'speaking') setState('idle');
-  }
 
   return {
     state,

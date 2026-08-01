@@ -16,21 +16,23 @@ async function bootstrap() {
 
   // Validate all required environment variables on startup
   // Hard-fails if any secret is missing — prevents partial deployments
-  validateSecrets(process.env as NodeJS.ProcessEnv);
+  validateSecrets(process.env);
 
   const app = await NestFactory.create(AppModule, {
     logger: ['error', 'warn', 'log', 'debug'],
   });
 
   const config = app.get(ConfigService);
-  const port   = config.get<number>('app.port', 3001);
+  const port = config.get<number>('app.port', 3001);
 
   // Security middleware
   app.use(buildHelmetConfig());
   app.enableCors(buildCorsConfig(config.get('app.corsAllowedOrigins', [])));
 
   // Rate limiting
-  const rateLimiters = buildRateLimiters(config.get('redis.url', 'redis://localhost:6379'));
+  const rateLimiters = buildRateLimiters(
+    config.get('redis.url', 'redis://localhost:6379'),
+  );
   app.use(rateLimiters.global);
   app.use('/chats', rateLimiters.chat);
   app.use('/auth', rateLimiters.auth);
@@ -38,7 +40,11 @@ async function bootstrap() {
 
   // Global validation + sanitization
   app.useGlobalPipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
     new InputSanitizationPipe(),
   );
 
@@ -54,11 +60,11 @@ async function bootstrap() {
       .build();
     const doc = SwaggerModule.createDocument(app, swaggerConfig);
     SwaggerModule.setup('api/docs', app, doc);
-    logger.log(`Swagger: http://localhost:${port}/api/docs`);
+    logger.log(`Swagger available at /api/docs (port ${port})`);
   }
 
   await app.listen(port);
-  logger.log(`Backend running on http://localhost:${port}`);
+  logger.log(`Backend listening on port ${port}`);
 }
 
-bootstrap();
+void bootstrap();

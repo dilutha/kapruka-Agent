@@ -3,12 +3,16 @@
   "private": true,
   "workspaces": ["backend", "frontend"],
   "scripts": {
-    "dev": "concurrently \"yarn workspace backend dev\" \"yarn workspace frontend dev\"",
+    "dev": "concurrently \"npm run start:dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
     "build": "npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
-    "test": "yarn workspace backend test",
+    "test": "npm run test --workspace=backend",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "js-yaml": "5.2.2"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

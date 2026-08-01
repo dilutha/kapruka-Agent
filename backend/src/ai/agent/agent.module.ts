@@ -10,9 +10,10 @@ import { PromptLibrary } from './prompts/prompt-library';
 import { LanguageDetector } from '../language/language-detector';
 import { McpModule } from '../../mcp/mcp.module';
 import { ProductModule } from '../../modules/product/product.module';
+import { GeminiModule } from '../gemini/gemini.module';
 
 @Module({
-  imports: [McpModule, ProductModule],
+  imports: [McpModule, ProductModule, GeminiModule],
   providers: [
     AgentOrchestrator,
     IntentClassifier,
@@ -24,6 +25,10 @@ import { ProductModule } from '../../modules/product/product.module';
     PromptLibrary,
     LanguageDetector,
   ],
-  exports: [AgentOrchestrator],
+  // IntentClassifier is exported so ChatService can run it *concurrently*
+  // with language detection (see ChatService.sendMessageStream) instead of
+  // strictly after it — the graph's own intent_classifier node then skips
+  // its call entirely when it sees the result already seeded into state.
+  exports: [AgentOrchestrator, IntentClassifier],
 })
 export class AgentModule {}

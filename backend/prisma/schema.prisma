@@ -123,6 +123,8 @@ model Chat {
   /// Auto-generated from first user message (truncated to 80 chars)
   title            String?
   status           ChatStatus       @default(ACTIVE)
+  /// Pinned chats surface at the top of the sidebar, above date groups
+  isPinned         Boolean          @default(false) @map("is_pinned")
   detectedLanguage Language         @default(EN) @map("detected_language")
   /// Serialised LangGraph AgentState — restored on each turn
   /// Enables cart continuity, language memory, and context recall
@@ -156,7 +158,7 @@ model Message {
   role       MessageRole
   /// Full message text — may be empty for pure tool-call messages
   content    String
-  /// OpenAI-format tool_calls array (for ASSISTANT messages that invoked tools)
+  /// Provider-neutral tool_calls array (for ASSISTANT messages that invoked tools)
   /// [{ id, type, function: { name, arguments } }]
   toolCalls  Json?       @map("tool_calls")
   /// Tool execution result (for TOOL role messages)

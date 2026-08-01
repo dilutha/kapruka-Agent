@@ -82,7 +82,7 @@ export type AnalyticsEventName =
 
 export interface TrackParams {
   eventName: AnalyticsEventName;
-  userId?:   string;
+  userId?: string;
   sessionId?: string;
   properties?: Record<string, string | number | boolean | null | undefined>;
 }
@@ -98,10 +98,10 @@ export class AnalyticsService {
     const key = this.config.get<string>('POSTHOG_KEY');
     if (key) {
       this.posthog = new PostHog(key, {
-        host:           'https://eu.posthog.com',  // EU data residency
-        flushAt:        10,                         // Batch 10 events before flush
-        flushInterval:  5000,                       // Or every 5 seconds
-        disableGeoip:   true,                       // Don't capture IP location
+        host: 'https://eu.posthog.com', // EU data residency
+        flushAt: 10, // Batch 10 events before flush
+        flushInterval: 5000, // Or every 5 seconds
+        disableGeoip: true, // Don't capture IP location
       });
       this.logger.log('PostHog analytics initialized');
     } else {
@@ -117,15 +117,16 @@ export class AnalyticsService {
     if (!this.posthog) return;
 
     try {
+      await Promise.resolve();
       const distinctId = params.userId ?? params.sessionId ?? 'anonymous';
 
       this.posthog.capture({
         distinctId,
-        event:      params.eventName,
+        event: params.eventName,
         properties: {
           ...params.properties,
           // Standard context
-          $lib:       'kapruka-agent-server',
+          $lib: 'kapruka-agent-server',
           environment: process.env.NODE_ENV ?? 'production',
         },
       });
@@ -140,22 +141,25 @@ export class AnalyticsService {
    * Includes step index for funnel drop-off analysis in PostHog.
    */
   async trackFunnelStep(params: {
-    funnel:    'checkout' | 'product_discovery';
-    step:      string;
+    funnel: 'checkout' | 'product_discovery';
+    step: string;
     stepIndex: number;
-    userId?:   string;
+    userId?: string;
     sessionId?: string;
     properties?: Record<string, unknown>;
   }): Promise<void> {
     await this.track({
-      eventName:  `${params.funnel}_${params.step}` as AnalyticsEventName,
-      userId:     params.userId,
-      sessionId:  params.sessionId,
+      eventName: `${params.funnel}_${params.step}` as AnalyticsEventName,
+      userId: params.userId,
+      sessionId: params.sessionId,
       properties: {
-        funnel:     params.funnel,
-        step:       params.step,
+        funnel: params.funnel,
+        step: params.step,
         step_index: params.stepIndex,
-        ...(params.properties as Record<string, string | number | boolean | null | undefined>),
+        ...(params.properties as Record<
+          string,
+          string | number | boolean | null | undefined
+        >),
       },
     });
   }
@@ -165,17 +169,17 @@ export class AnalyticsService {
    * Called on sign-in/sign-up. No PII in traits.
    */
   identify(params: {
-    userId:     string;
-    language?:  string;
-    isGuest:    boolean;
+    userId: string;
+    language?: string;
+    isGuest: boolean;
   }): void {
     if (!this.posthog) return;
 
     this.posthog.identify({
       distinctId: params.userId,
       properties: {
-        language:  params.language ?? 'EN',
-        is_guest:  params.isGuest,
+        language: params.language ?? 'EN',
+        is_guest: params.isGuest,
       },
     });
   }
@@ -188,7 +192,7 @@ export class AnalyticsService {
 
     this.posthog.alias({
       distinctId: params.userId,
-      alias:      params.guestSessionId,
+      alias: params.guestSessionId,
     });
   }
 
@@ -243,31 +247,31 @@ export function useAnalytics() {
 
 export const KEY_METRICS = {
   // Acquisition
-  CHAT_STARTS_PER_DAY:          'count of chat_created per day',
-  GUEST_VS_AUTHED_RATIO:        'split of is_guest property on chat_created',
+  CHAT_STARTS_PER_DAY: 'count of chat_created per day',
+  GUEST_VS_AUTHED_RATIO: 'split of is_guest property on chat_created',
 
   // Engagement
-  MESSAGES_PER_SESSION:         'average count of chat_message_sent per chat_id',
-  INTENT_DISTRIBUTION:          'breakdown of intent property on intent_classified',
-  LANGUAGE_BREAKDOWN:           'breakdown of language on chat_message_sent',
-  SINGLISH_ADOPTION:            'count of singlish_detected per day',
+  MESSAGES_PER_SESSION: 'average count of chat_message_sent per chat_id',
+  INTENT_DISTRIBUTION: 'breakdown of intent property on intent_classified',
+  LANGUAGE_BREAKDOWN: 'breakdown of language on chat_message_sent',
+  SINGLISH_ADOPTION: 'count of singlish_detected per day',
 
   // Product discovery
-  SEARCH_TO_CART_RATE:          'funnel: product_searched → product_added_to_cart',
-  MOST_SEARCHED_CATEGORIES:     'top 10 values of category on product_searched',
+  SEARCH_TO_CART_RATE: 'funnel: product_searched → product_added_to_cart',
+  MOST_SEARCHED_CATEGORIES: 'top 10 values of category on product_searched',
 
   // Conversion
-  CART_TO_CHECKOUT_RATE:        'funnel: cart_viewed → checkout_started',
-  CHECKOUT_COMPLETION_RATE:     'funnel: checkout_started → checkout_order_placed',
-  CHECKOUT_DROP_OFF_BY_STEP:    'funnel by step_index on checkout_* events',
-  AVERAGE_ORDER_VALUE:          'average of order_total on checkout_order_placed',
+  CART_TO_CHECKOUT_RATE: 'funnel: cart_viewed → checkout_started',
+  CHECKOUT_COMPLETION_RATE: 'funnel: checkout_started → checkout_order_placed',
+  CHECKOUT_DROP_OFF_BY_STEP: 'funnel by step_index on checkout_* events',
+  AVERAGE_ORDER_VALUE: 'average of order_total on checkout_order_placed',
 
   // AI quality
-  AGENT_FALLBACK_RATE:          'agent_fallback / chat_message_sent',
-  MCP_TOOL_FAILURE_RATE:        'mcp_tool_failed / mcp_tool_called',
-  INJECTION_ATTEMPTS_PER_DAY:   'count of prompt_injection_attempt per day',
+  AGENT_FALLBACK_RATE: 'agent_fallback / chat_message_sent',
+  MCP_TOOL_FAILURE_RATE: 'mcp_tool_failed / mcp_tool_called',
+  INJECTION_ATTEMPTS_PER_DAY: 'count of prompt_injection_attempt per day',
 
   // Voice
-  VOICE_ADOPTION_RATE:          'voice_recording_started / chat_message_sent',
-  VOICE_SUCCESS_RATE:           'voice_transcription_completed / voice_recording_started',
+  VOICE_ADOPTION_RATE: 'voice_recording_started / chat_message_sent',
+  VOICE_SUCCESS_RATE: 'voice_transcription_completed / voice_recording_started',
 } as const;

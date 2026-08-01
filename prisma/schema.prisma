@@ -301,7 +301,7 @@ model Message {
   /// Full message text — may be empty for pure tool-call messages
   content    String      @db.Text
 
-  /// OpenAI-format tool_calls array (for ASSISTANT messages that invoked tools)
+  /// Provider-neutral tool_calls array (for ASSISTANT messages that invoked tools)
   /// [{ id, type, function: { name, arguments } }]
   toolCalls  Json?       @map("tool_calls") @db.JsonB
 

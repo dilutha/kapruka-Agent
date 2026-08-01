@@ -15,38 +15,40 @@
  */
 
 import { Injectable, Logger } from '@nestjs/common';
-import { ChatOpenAI } from '@langchain/openai';
-import {
-  SystemMessage,
-  AIMessage,
-  ToolMessage,
-} from '@langchain/core/messages';
 
 import { AgentState } from '../agent-orchestrator';
 import { McpClientService } from '../../../mcp/mcp-client.service';
 import { PromptLibrary } from '../prompts/prompt-library';
 import { ProductCacheRepository } from '../../../modules/product/repositories/product-cache.repository';
 import { Language } from '@prisma/client';
+import { GeminiService } from '../../gemini/gemini.service';
 
 @Injectable()
 export class ProductSearchNode {
   private readonly logger = new Logger(ProductSearchNode.name);
-  private readonly model: ChatOpenAI;
 
   constructor(
     private readonly mcpClient: McpClientService,
     private readonly prompts: PromptLibrary,
     private readonly productCache: ProductCacheRepository,
-  ) {
-    this.model = new ChatOpenAI({
-      model: 'gpt-4o',
-      temperature: 0.3, // Slightly creative for natural phrasing, not for facts
-      streaming: true,
-    });
-  }
+    private readonly gemini: GeminiService,
+  ) {}
+
+  // Purely referential follow-ups — "show cheaper ones", "any cheaper
+  // options" — never restate the product themselves. `searchQuery` still
+  // resolves them (it's seeded from the previous turn's persisted context
+  // whenever the classifier extracted nothing new this turn — see
+  // AgentOrchestrator.streamMessage), but a plain re-run of the same search
+  // would ignore what the user actually asked for. Detecting these keywords
+  // in the raw message and turning them into real min/max price filters is
+  // what makes "cheaper ones" actually narrow the results.
+  private static readonly CHEAPER_PATTERN =
+    /\b(cheap(er)?|less expensive|budget|affordable|lower price)\b/i;
+  private static readonly PREMIUM_PATTERN =
+    /\b(premium|expensive|luxury|higher end|top range|pricier)\b/i;
 
   async invoke(state: AgentState): Promise<Partial<AgentState>> {
-    const { searchQuery, language, messages } = state;
+    const { searchQuery, language } = state;
 
     if (!searchQuery) {
       return {
@@ -55,10 +57,29 @@ export class ProductSearchNode {
       };
     }
 
-    this.logger.log(`Product search: "${searchQuery}" [${language}]`);
+    const rawMessage = this.lastHumanMessageText(state);
+    const wantsCheaper = ProductSearchNode.CHEAPER_PATTERN.test(rawMessage);
+    const wantsPremium = ProductSearchNode.PREMIUM_PATTERN.test(rawMessage);
+    const priceFilterActive = wantsCheaper || wantsPremium;
 
-    // Step 1: Check product cache first
-    const cached = await this.productCache.findByQuery(searchQuery);
+    // A prior stated budget anchors "cheaper" to something concrete (30%
+    // under it); with no prior budget, fall back to a broad ceiling/floor
+    // that still meaningfully separates "cheap" from "premium" results.
+    const maxPrice = wantsCheaper
+      ? Math.round((state.budget ?? 6000) * 0.7)
+      : undefined;
+    const minPrice = wantsPremium ? (state.budget ?? 5000) : undefined;
+
+    this.logger.log(
+      `Product search: "${searchQuery}" [${language}]${priceFilterActive ? ` (price filter: ${wantsCheaper ? `<=${maxPrice}` : `>=${minPrice}`})` : ''}`,
+    );
+
+    // A price-filtered request must hit MCP with that filter applied — the
+    // product cache has no price dimension, so a cache hit here would
+    // silently ignore "cheaper" and just return the same results as before.
+    const cached = priceFilterActive
+      ? null
+      : await this.productCache.findByQuery(searchQuery);
 
     let searchResults;
     if (cached && cached.length > 0) {
@@ -71,11 +92,15 @@ export class ProductSearchNode {
           query: searchQuery,
           language: language === Language.SI ? 'si' : 'en',
           limit: 8,
+          maxPrice,
+          minPrice,
         });
         searchResults = mcpResult.products;
 
-        // Step 3: Cache results
-        if (searchResults.length > 0) {
+        // Step 3: Cache results (price-filtered results aren't cached under
+        // the plain query key — they'd wrongly satisfy a future unfiltered
+        // search for the same term).
+        if (searchResults.length > 0 && !priceFilterActive) {
           await this.productCache.upsertMany(searchResults);
         }
       } catch (err) {
@@ -92,47 +117,36 @@ export class ProductSearchNode {
       }
     }
 
-    // Step 4: Build tool-grounded context for the LLM
-    // Inject results as a ToolMessage so the model sees them as ground truth
-    const toolCallId = `search_${Date.now()}`;
-    const groundedMessages = [
-      new SystemMessage(this.prompts.getProductSearchPrompt(language)),
-      ...messages.slice(-10), // Recent conversation context
-      new AIMessage({
-        content: '',
-        tool_calls: [
-          {
-            id: toolCallId,
-            name: 'searchProducts',
-            args: { query: searchQuery },
-          },
-        ],
-      }),
-      new ToolMessage({
-        tool_call_id: toolCallId,
-        content: JSON.stringify({
-          query: searchQuery,
-          count: searchResults.length,
-          products: searchResults.map((p) => ({
-            id: p.id,
-            name: p.name,
-            priceMin: p.priceMin,
-            priceMax: p.priceMax,
-            currency: p.currency,
-            category: p.category,
-            imageUrls: p.imageUrls,
-            isAvailable: p.isAvailable,
-          })),
-        }),
-      }),
-    ];
+    const groundedContext = JSON.stringify({
+      query: searchQuery,
+      count: searchResults.length,
+      products: searchResults.map((p) => ({
+        id: p.id,
+        name: p.name,
+        priceMin: p.priceMin,
+        priceMax: p.priceMax,
+        currency: p.currency,
+        category: p.category,
+        imageUrls: p.imageUrls,
+        isAvailable: p.isAvailable,
+      })),
+    });
 
-    // Step 5: Generate grounded response
-    const response = await this.model.invoke(groundedMessages);
+    const response = await this.gemini.generateText({
+      systemInstruction: this.prompts.getProductSearchPrompt(language),
+      messages: [
+        {
+          role: 'user',
+          text: `User search query: ${searchQuery}\n\nKapruka MCP searchProducts result JSON:\n${groundedContext}`,
+        },
+      ],
+      temperature: 0.3,
+      maxOutputTokens: 350,
+    });
 
     return {
       searchResults,
-      response: response.content as string,
+      response,
       responseType: 'product_list',
       toolResults: [
         {
@@ -146,19 +160,32 @@ export class ProductSearchNode {
 
   private getNoQueryMessage(language: Language): string {
     const messages: Record<Language, string> = {
-      [Language.EN]: "What are you looking for? Tell me a product name, category, or occasion and I'll search Kapruka for you.",
-      [Language.SI]: "ඔබ සොයන දෙය කුමක්ද? නිෂ්පාදනයේ නමක් හෝ ප්‍රවර්ගයක් ලබා දෙන්න.",
-      [Language.SINGLISH]: "What you want to find machan? Tell me product name or category, I'll search for you!",
+      [Language.EN]:
+        "What are you looking for? Tell me a product name, category, or occasion and I'll search Kapruka for you.",
+      [Language.SI]:
+        'ඔබ සොයන දෙය කුමක්ද? නිෂ්පාදනයේ නමක් හෝ ප්‍රවර්ගයක් ලබා දෙන්න.',
+      [Language.SINGLISH]:
+        "What you want to find machan? Tell me product name or category, I'll search for you!",
     };
     return messages[language] ?? messages[Language.EN];
   }
 
   private getMcpErrorMessage(language: Language): string {
     const messages: Record<Language, string> = {
-      [Language.EN]: "I'm having trouble reaching the Kapruka catalog right now. Please try again in a moment.",
-      [Language.SI]: "Kapruka සමඟ සම්බන්ධ වීමට ගැටලුවක් ඇත. කරුණාකර නැවත උත්සාහ කරන්න.",
-      [Language.SINGLISH]: "Aiyo, can't reach Kapruka right now machan. Try again in a bit ah?",
+      [Language.EN]:
+        "I'm having trouble reaching the Kapruka catalog right now. Please try again in a moment.",
+      [Language.SI]:
+        'Kapruka සමඟ සම්බන්ධ වීමට ගැටලුවක් ඇත. කරුණාකර නැවත උත්සාහ කරන්න.',
+      [Language.SINGLISH]:
+        "Aiyo, can't reach Kapruka right now machan. Try again in a bit ah?",
     };
     return messages[language] ?? messages[Language.EN];
+  }
+
+  private lastHumanMessageText(state: AgentState): string {
+    const last = [...state.messages]
+      .reverse()
+      .find((m) => m._getType() === 'human');
+    return typeof last?.content === 'string' ? last.content : '';
   }
 }

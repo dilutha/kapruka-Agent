@@ -28,11 +28,12 @@ import {
   Logger,
   BadRequestException,
 } from '@nestjs/common';
-import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import { Request } from 'express';
 import { RedisService } from '../../redis/redis.service';
 import { PromptLibrary } from '../../ai/agent/prompts/prompt-library';
 import { AnalyticsService } from '../../modules/analytics/analytics.service';
+import { RequestWithUser } from '../../modules/auth/interfaces/request-with-user.interface';
 
 // ─── Prompt Injection Guard ───────────────────────────────────────────────────
 
@@ -101,9 +102,16 @@ export class PromptInjectionGuard implements CanActivate {
     if (message.length > this.SUSPICION_LENGTH) {
       const suspicionScore = this.computeSuspicionScore(message);
       if (suspicionScore > 0.7) {
-        await this.flagInjectionAttempt(ip, message, 'heuristic', suspicionScore);
+        await this.flagInjectionAttempt(
+          ip,
+          message,
+          'heuristic',
+          suspicionScore,
+        );
         // Don't block — just flag for monitoring
-        this.logger.warn(`Suspicious message from ${ip} (score: ${suspicionScore})`);
+        this.logger.warn(
+          `Suspicious message from ${ip} (score: ${suspicionScore})`,
+        );
       }
     }
 
@@ -115,9 +123,15 @@ export class PromptInjectionGuard implements CanActivate {
     const lower = message.toLowerCase();
 
     // Instruction-like language
-    if (/\b(must|should|will|always|never)\b.*\b(respond|reply|say|output)\b/i.test(lower)) score += 0.3;
+    if (
+      /\b(must|should|will|always|never)\b.*\b(respond|reply|say|output)\b/i.test(
+        lower,
+      )
+    )
+      score += 0.3;
     // Role-playing triggers
-    if (/\b(pretend|act|roleplay|imagine you are|you are now)\b/i.test(lower)) score += 0.4;
+    if (/\b(pretend|act|roleplay|imagine you are|you are now)\b/i.test(lower))
+      score += 0.4;
     // System boundary markers
     if (/[-]{3,}|[=]{3,}|\[.*\]/.test(message)) score += 0.2;
     // Excessive punctuation (formatting markers)
@@ -195,7 +209,11 @@ export class InputSanitizationPipe implements PipeTransform {
     for (const [key, val] of Object.entries(obj)) {
       if (typeof val === 'string') {
         sanitized[key] = this.sanitizeString(val);
-      } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+      } else if (
+        typeof val === 'object' &&
+        val !== null &&
+        !Array.isArray(val)
+      ) {
         sanitized[key] = this.sanitizeObject(val as Record<string, unknown>);
       } else {
         sanitized[key] = val;
@@ -210,7 +228,7 @@ export class InputSanitizationPipe implements PipeTransform {
     let sanitized = str.slice(0, this.MAX_STRING_LENGTH);
 
     // Strip null bytes (can cause issues in some DB drivers)
-    sanitized = sanitized.replace(/\x00/g, '');
+    sanitized = sanitized.split('\u0000').join('');
 
     // Strip HTML tags (all user-facing text is treated as plain text)
     sanitized = sanitized.replace(/<[^>]*>/g, '');
@@ -226,14 +244,15 @@ export class InputSanitizationPipe implements PipeTransform {
 
 @Injectable()
 export class ChatRateLimitGuard extends ThrottlerGuard {
-  protected async getTracker(req: Request): Promise<string> {
+  protected getTracker(req: Request): Promise<string> {
     // Rate limit by user ID when authenticated, IP otherwise
-    const userId = (req as any).user?.id;
-    if (userId) return `user:${userId}`;
+    const request = req as RequestWithUser;
+    const userId = request.user?.id;
+    if (userId) return Promise.resolve(`user:${userId}`);
 
-    const guestId = (req as any).guestUser?.id;
-    if (guestId) return `guest:${guestId}`;
+    const guestId = request.guestUser?.id;
+    if (guestId) return Promise.resolve(`guest:${guestId}`);
 
-    return `ip:${req.ip}`;
+    return Promise.resolve(`ip:${req.ip}`);
   }
 }

@@ -14,7 +14,7 @@
  *     "no?", "ithin", "den", "neh", "podi", "watte"
  *     If 2+ matches in message → Language.SINGLISH
  *
- *  3. LLM fallback (gpt-4o-mini)      → ~300ms
+ *  3. Gemini fallback                 → network-bound
  *     Only triggered for ambiguous cases not caught by heuristics
  *     Cached in Redis for identical strings (1-hour TTL)
  *
@@ -22,10 +22,9 @@
  */
 
 import { Injectable, Logger } from '@nestjs/common';
-import { ChatOpenAI } from '@langchain/openai';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { Language } from '@prisma/client';
 import { RedisService } from '../../redis/redis.service';
+import { GeminiService } from '../gemini/gemini.service';
 
 @Injectable()
 export class LanguageDetector {
@@ -36,39 +35,45 @@ export class LanguageDetector {
   private readonly SINHALA_RANGE_END = 0x0dff;
   private readonly SINHALA_THRESHOLD = 0.15; // 15% of chars in Sinhala block
 
-  // Singlish marker words/patterns (case-insensitive)
-  private readonly SINGLISH_MARKERS: RegExp[] = [
+  // Singlish marker words/patterns (case-insensitive), split by how
+  // unambiguous they are. "machan"/"aiyo"/etc. never occur in standard
+  // English, so ONE match is enough to call it — this matters concretely:
+  // "hii machan" has exactly one marker, and requiring 2+ (as this used to,
+  // uniformly) meant it fell through to the ASCII-only "clearly English"
+  // fast path and got detected as EN, not SINGLISH. Ambiguous tokens that
+  // double as English names/words ("Hari", "Anna", "no?" as a tag question)
+  // stay in the weak tier, needing 2+ co-occurrences to fire — a single
+  // "Anna" must not flip a genuinely English sentence to Singlish.
+  private readonly SINGLISH_STRONG_MARKERS: RegExp[] = [
     /\bmachan\b/i,
     /\baiyo\b/i,
     /\baney\b/i,
     /\bithin\b/i,
-    /\bneh\b/i,
     /\bwatte\b/i,
     /\bpodi\b/i,
     /\bpatta\b/i,
-    /\bada\b/i,
-    /\bhari\b/i,
-    /\banna\b/i,
     /\bmalli\b/i,
-    /\bakka\b/i,
     /\bnangi\b/i,
     /\bayya\b/i,
-    /\b(no|la|ah)\?/i,         // "right no?", "okay la", "coming ah?"
     /\bna\s*yaar\b/i,
     /\bgone\s*case\b/i,
     /\bsthu\b/i,
     /\bapey\b/i,
   ];
 
-  private readonly llmModel: ChatOpenAI;
+  private readonly SINGLISH_WEAK_MARKERS: RegExp[] = [
+    /\bneh\b/i,
+    /\bada\b/i,
+    /\bhari\b/i,
+    /\banna\b/i,
+    /\bakka\b/i,
+    /\b(no|la|ah)\?/i, // "right no?", "okay la", "coming ah?"
+  ];
 
-  constructor(private readonly redis: RedisService) {
-    this.llmModel = new ChatOpenAI({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      maxTokens: 10,
-    });
-  }
+  constructor(
+    private readonly redis: RedisService,
+    private readonly gemini: GeminiService,
+  ) {}
 
   async detect(text: string): Promise<Language> {
     if (!text || text.trim().length === 0) return Language.EN;
@@ -108,15 +113,21 @@ export class LanguageDetector {
       }
     }
 
-    return totalChars > 0 && sinhalaCount / totalChars >= this.SINHALA_THRESHOLD;
+    return (
+      totalChars > 0 && sinhalaCount / totalChars >= this.SINHALA_THRESHOLD
+    );
   }
 
   private hasSinglishMarkers(text: string): boolean {
-    let matchCount = 0;
-    for (const pattern of this.SINGLISH_MARKERS) {
+    if (this.SINGLISH_STRONG_MARKERS.some((pattern) => pattern.test(text))) {
+      return true;
+    }
+
+    let weakMatchCount = 0;
+    for (const pattern of this.SINGLISH_WEAK_MARKERS) {
       if (pattern.test(text)) {
-        matchCount++;
-        if (matchCount >= 2) return true; // Two distinct markers = confident Singlish
+        weakMatchCount++;
+        if (weakMatchCount >= 2) return true; // Two ambiguous markers = confident enough
       }
     }
     return false;
@@ -124,7 +135,11 @@ export class LanguageDetector {
 
   private isClearlyEnglish(text: string): boolean {
     // All characters are in ASCII printable range + basic Latin
-    // and no Sinhala/Tamil Unicode detected
+    // and no Sinhala/Tamil Unicode detected.
+    // The \x00-\x1F control range is deliberate: this is a whole-string
+    // whitelist, and excluding control characters here would misclassify
+    // otherwise-English text that merely contains a stray \t or \r.
+    // eslint-disable-next-line no-control-regex
     return /^[\x00-\x7F\u00C0-\u024F\s.,!?'"()\-:;]+$/.test(text);
   }
 
@@ -139,9 +154,8 @@ export class LanguageDetector {
     }
 
     try {
-      const response = await this.llmModel.invoke([
-        new SystemMessage(
-          `Classify the language of the following text. 
+      const response = await this.gemini.generateText({
+        systemInstruction: `Classify the language of the following text. 
 Respond with EXACTLY one word: EN, SI, or SINGLISH.
 
 Definitions:
@@ -150,11 +164,12 @@ Definitions:
 - SINGLISH: English mixed with Sinhala/Sri Lankan slang (e.g. "machan", "aiyo", "la", "neh", "ah?")
 
 ONLY output the classification word. No explanation.`,
-        ),
-        new HumanMessage(text.slice(0, 200)), // Limit to 200 chars
-      ]);
+        messages: [{ role: 'user', text: text.slice(0, 200) }],
+        temperature: 0,
+        maxOutputTokens: 10,
+      });
 
-      const raw = (response.content as string).trim().toUpperCase();
+      const raw = response.trim().toUpperCase();
       const language =
         raw === 'SI'
           ? Language.SI

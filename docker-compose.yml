@@ -61,7 +61,7 @@ services:
       DIRECT_URL:             postgresql://kapruka:kapruka_dev_password@postgres:5432/kapruka_dev
       REDIS_URL:              redis://redis:6379
       KAPRUKA_MCP_SERVER_URL: ${KAPRUKA_MCP_SERVER_URL}
-      OPENAI_API_KEY:         ${OPENAI_API_KEY}
+      GEMINI_API_KEY:         ${GEMINI_API_KEY}
       CLERK_SECRET_KEY:       ${CLERK_SECRET_KEY}
       GUEST_TOKEN_SECRET:     ${GUEST_TOKEN_SECRET}
       NEXTJS_URL:             http://localhost:3000

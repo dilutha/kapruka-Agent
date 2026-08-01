@@ -26,24 +26,38 @@ export class ChatRepository {
     });
   }
 
-  async findByOwner(params: { userId?: string; guestUserId?: string }) {
+  async findByOwner(params: {
+    userId?: string;
+    guestUserId?: string;
+    status?: ChatStatus;
+  }) {
     return this.prisma.chat.findMany({
       where: {
         OR: [
           { userId: params.userId ?? undefined },
           { guestUserId: params.guestUserId ?? undefined },
         ],
-        status: ChatStatus.ACTIVE,
+        status: params.status ?? ChatStatus.ACTIVE,
       },
-      orderBy: { updatedAt: 'desc' },
-      take: 50,
+      // Pinned chats first, then most recently active — mirrors how the
+      // sidebar groups and orders them.
+      orderBy: [{ isPinned: 'desc' }, { updatedAt: 'desc' }],
+      take: 100,
     });
   }
 
-  async archive(id: string) {
+  async setStatus(id: string, status: ChatStatus) {
+    return this.prisma.chat.update({ where: { id }, data: { status } });
+  }
+
+  async setPinned(id: string, isPinned: boolean) {
+    return this.prisma.chat.update({ where: { id }, data: { isPinned } });
+  }
+
+  async updateTitle(id: string, title: string) {
     return this.prisma.chat.update({
       where: { id },
-      data: { status: ChatStatus.ARCHIVED },
+      data: { title },
     });
   }
 
@@ -51,6 +65,22 @@ export class ChatRepository {
     return this.prisma.chat.update({
       where: { id },
       data: { detectedLanguage: language },
+    });
+  }
+
+  /**
+   * Creates a new chat that's a snapshot copy of `source` — same owner and
+   * title (suffixed), independent from here on (renaming/deleting the copy
+   * never touches the original, and vice versa).
+   */
+  async duplicate(source: Chat): Promise<Chat> {
+    return this.prisma.chat.create({
+      data: {
+        userId: source.userId,
+        guestUserId: source.guestUserId,
+        title: source.title ? `${source.title} (copy)` : null,
+        detectedLanguage: source.detectedLanguage,
+      },
     });
   }
 }

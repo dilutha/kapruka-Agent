@@ -1,137 +1,151 @@
 'use client';
-import { useState } from 'react';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
-import { useKaprukStore, useCartTotal } from '@/stores/kapruk.store';
-import { apiClient } from '@/lib/api-client';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useKaprukStore, useCartTotal, CheckoutInfo } from '@/stores/kapruk.store';
+import { CheckoutPaymentCard } from '@/components/checkout/CheckoutPaymentCard';
+import { apiClient } from '@/lib/api-client';
 
-const addressSchema = z.object({
-  recipientName: z.string().min(2),
-  phone:         z.string().regex(/^(\+94|0)?[1-9]\d{8}$/, 'Invalid Sri Lankan phone number'),
-  addressLine1:  z.string().min(5),
-  city:          z.string().min(2),
-  district:      z.string().min(2),
-});
-type AddressForm = z.infer<typeof addressSchema>;
+/**
+ * Real checkout only has one implementation in this app: the conversational
+ * flow in checkout.node.ts, which is the only place that ever calls
+ * `kapruka_create_order` (address/phone/date collection needs entity
+ * extraction a static form can't do, and duplicating that logic here would
+ * mean two checkouts that can silently disagree). This page is the
+ * non-chat entry point into that same flow — it never places an order
+ * itself, it shows what the AI already collected (auto-fill, per spec) and
+ * hands off to the chat to finish, or shows the real payment link once the
+ * AI has already produced one.
+ */
 
-interface OrderResponse {
-  id: string;
-  kaprukOrderId?: string;
+interface ChatContextStateResponse {
+  contextState: {
+    checkoutStep?: string;
+    orderRef?: string;
+    checkoutUrl?: string;
+    orderSummary?: CheckoutInfo['summary'];
+    shippingAddress?: { recipientName: string; addressLine1: string; city: string };
+    deliveryDate?: string;
+  } | null;
 }
 
-const DISTRICTS = ['Colombo','Gampaha','Kalutara','Kandy','Matale','Nuwara Eliya',
-  'Galle','Matara','Hambantota','Jaffna','Batticaloa','Trincomalee','Kurunegala',
-  'Anuradhapura','Polonnaruwa','Badulla','Ratnapura','Kegalle'];
-
 export default function CheckoutPage() {
-  const { items, clearCart } = useKaprukStore();
+  const { items, activeChatId } = useKaprukStore();
   const total = useCartTotal();
   const router = useRouter();
-  const [step, setStep] = useState<'address' | 'review' | 'done'>('address');
-  const [placingOrder, setPlacingOrder] = useState(false);
-  const [orderId, setOrderId] = useState('');
+  const [checkoutInfo, setCheckoutInfo] = useState<CheckoutInfo | null>(null);
+  const [collected, setCollected] = useState<ChatContextStateResponse['contextState']>(null);
+  const [loading, setLoading] = useState(Boolean(activeChatId));
 
-  const { register, handleSubmit, formState: { errors }, getValues } = useForm<AddressForm>({
-    resolver: zodResolver(addressSchema),
-  });
+  useEffect(() => {
+    // No setState here for the "nothing to fetch" case — `loading`'s
+    // initial value already accounts for a missing activeChatId, so there's
+    // nothing to synchronize on this render.
+    if (!activeChatId) return;
 
-  const onAddressSubmit = () => setStep('review');
+    apiClient
+      .get<ChatContextStateResponse>(`/chats/${activeChatId}`)
+      .then((chat) => {
+        const ctx = chat.contextState;
+        setCollected(ctx);
+        if (ctx?.checkoutStep === 'placed' && ctx.checkoutUrl && ctx.orderRef && ctx.orderSummary) {
+          setCheckoutInfo({
+            orderRef: ctx.orderRef,
+            checkoutUrl: ctx.checkoutUrl,
+            summary: ctx.orderSummary,
+          });
+        }
+      })
+      .catch((error) => console.error('Failed to load checkout context:', error))
+      .finally(() => setLoading(false));
+  }, [activeChatId]);
 
-  const placeOrder = async () => {
-    setPlacingOrder(true);
-    try {
-      const addr = getValues();
-      const result = await apiClient.post<OrderResponse>('/orders', {
-        items,
-        shippingAddress: addr,
-        paymentMethod: 'cod',
-      });
-      setOrderId(result.kaprukOrderId ?? result.id);
-      clearCart();
-      setStep('done');
-    } catch {
-      alert('Order failed. Please try again.');
-    } finally {
-      setPlacingOrder(false);
+  const continueInChat = () => {
+    if (activeChatId) {
+      router.push(`/chat/${activeChatId}?q=${encodeURIComponent("I'd like to checkout")}`);
+    } else {
+      router.push('/chat');
     }
   };
 
-  if (step === 'done') return (
-    <div style={{ maxWidth: 480, margin: '80px auto', textAlign: 'center', padding: 24, fontFamily: 'var(--k-font-sans)' }}>
-      <div style={{ fontSize: 48, marginBottom: 16 }}>🎉</div>
-      <h1 style={{ fontFamily: 'var(--k-font-serif)', fontSize: 26, marginBottom: 8 }}>Order placed!</h1>
-      <p style={{ color: 'var(--k-color-text-2)', marginBottom: 24 }}>Your order <strong>{orderId}</strong> has been confirmed.</p>
-      <button className="k-btn k-btn-primary" onClick={() => router.push('/chat')}>Continue shopping</button>
-    </div>
-  );
+  if (loading) {
+    return (
+      <div style={{ maxWidth: 480, margin: '80px auto', textAlign: 'center', padding: 24 }}>
+        <div className="k-skeleton" style={{ height: 120, borderRadius: 12 }} />
+      </div>
+    );
+  }
+
+  if (checkoutInfo) {
+    return (
+      <div style={{ maxWidth: 480, margin: '80px auto', padding: 24, fontFamily: 'var(--k-font-sans)' }}>
+        <h1 style={{ fontFamily: 'var(--k-font-serif)', fontSize: 24, marginBottom: 16, textAlign: 'center' }}>
+          Ready for payment 🎉
+        </h1>
+        <CheckoutPaymentCard checkoutInfo={checkoutInfo} />
+        <button
+          className="k-btn k-btn-ghost"
+          style={{ width: '100%', marginTop: 16 }}
+          onClick={() => router.push('/chat')}
+        >
+          Continue shopping
+        </button>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div style={{ maxWidth: 480, margin: '80px auto', textAlign: 'center', padding: 24, fontFamily: 'var(--k-font-sans)' }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>🛒</div>
+        <h1 style={{ fontFamily: 'var(--k-font-serif)', fontSize: 22, marginBottom: 8 }}>Your cart is empty</h1>
+        <p style={{ color: 'var(--k-color-text-2)', marginBottom: 20, fontSize: 13.5 }}>
+          Chat with Kapruka AI to find something first, then come back here to check out.
+        </p>
+        <button className="k-btn k-btn-primary" onClick={() => router.push('/chat')}>Start shopping</button>
+      </div>
+    );
+  }
+
+  const address = collected?.shippingAddress;
 
   return (
-    <div style={{ maxWidth: 560, margin: '40px auto', padding: 24, fontFamily: 'var(--k-font-sans)', color: 'var(--k-color-text)' }}>
-      <h1 style={{ fontSize: 22, fontWeight: 500, marginBottom: 24 }}>
-        {step === 'address' ? 'Delivery details' : 'Review order'}
-      </h1>
+    <div style={{ maxWidth: 520, margin: '60px auto', padding: 24, fontFamily: 'var(--k-font-sans)', color: 'var(--k-color-text)' }}>
+      <h1 style={{ fontSize: 22, fontWeight: 500, marginBottom: 4 }}>Your order</h1>
+      <p style={{ fontSize: 13, color: 'var(--k-color-text-2)', marginBottom: 20 }}>
+        Kapruka AI collects your delivery details in chat, then hands you a secure Kapruka
+        payment link — reviewed here, never a separate simulated checkout.
+      </p>
 
-      {step === 'address' && (
-        <form onSubmit={handleSubmit(onAddressSubmit)} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {([
-            { name: 'recipientName', label: 'Recipient name', placeholder: 'Full name' },
-            { name: 'phone',         label: 'Phone number',    placeholder: '077 123 4567' },
-            { name: 'addressLine1',  label: 'Address',         placeholder: '123 Main Street' },
-            { name: 'city',          label: 'City',            placeholder: 'Colombo' },
-          ] satisfies Array<{
-            name: keyof Pick<AddressForm, 'recipientName' | 'phone' | 'addressLine1' | 'city'>;
-            label: string;
-            placeholder: string;
-          }>).map(f => (
-            <div key={f.name}>
-              <label style={{ fontSize: 12, color: 'var(--k-color-text-2)', marginBottom: 4, display: 'block' }}>{f.label}</label>
-              <input {...register(f.name)} placeholder={f.placeholder} className="k-input" />
-              {errors[f.name as keyof typeof errors] && (
-                <span style={{ fontSize: 11, color: 'var(--k-color-danger)' }}>
-                  {errors[f.name as keyof typeof errors]?.message as string}
-                </span>
-              )}
-            </div>
-          ))}
-          <div>
-            <label style={{ fontSize: 12, color: 'var(--k-color-text-2)', marginBottom: 4, display: 'block' }}>District</label>
-            <select {...register('district')} className="k-input">
-              <option value="">Select district</option>
-              {DISTRICTS.map(d => <option key={d} value={d}>{d}</option>)}
-            </select>
+      <div className="k-card" style={{ padding: 16, marginBottom: 16 }}>
+        <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 12 }}>Items ({items.length})</h3>
+        {items.map((i) => (
+          <div key={i.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
+            <span>{i.name} × {i.quantity}</span>
+            <span>{i.currency} {(i.unitPrice * i.quantity).toLocaleString()}</span>
           </div>
-          <button type="submit" className="k-btn k-btn-primary" style={{ marginTop: 8, padding: '12px 0' }}>Continue to review</button>
-        </form>
-      )}
+        ))}
+        <div style={{ borderTop: '1px solid var(--k-color-border)', paddingTop: 10, marginTop: 10, display: 'flex', justifyContent: 'space-between', fontWeight: 500 }}>
+          <span>Subtotal</span>
+          <span style={{ color: 'var(--k-color-accent)' }}>LKR {total.toLocaleString()}</span>
+        </div>
+      </div>
 
-      {step === 'review' && (
-        <div>
-          <div className="k-card" style={{ padding: 16, marginBottom: 20 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 12 }}>Order items ({items.length})</h3>
-            {items.map(i => (
-              <div key={i.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
-                <span>{i.name} × {i.quantity}</span>
-                <span>LKR {(i.unitPrice * i.quantity).toLocaleString()}</span>
-              </div>
-            ))}
-            <div style={{ borderTop: '1px solid var(--k-color-border)', paddingTop: 10, marginTop: 10, display: 'flex', justifyContent: 'space-between', fontWeight: 500 }}>
-              <span>Total</span>
-              <span style={{ color: 'var(--k-color-accent)' }}>LKR {total.toLocaleString()}</span>
-            </div>
-          </div>
-          <p style={{ fontSize: 12, color: 'var(--k-color-text-3)', marginBottom: 16 }}>
-            🔒 Payment: Cash on delivery. Your card details are never stored.
+      {address && (
+        <div className="k-card" style={{ padding: 16, marginBottom: 16 }}>
+          <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>
+            Delivery details so far <span style={{ fontWeight: 400, color: 'var(--k-color-text-3)', fontSize: 12 }}>— auto-filled from chat ✨</span>
+          </h3>
+          <p style={{ fontSize: 13, color: 'var(--k-color-text-2)', lineHeight: 1.6 }}>
+            {address.recipientName}<br />
+            {address.addressLine1}, {address.city}
+            {collected?.deliveryDate && <><br />Delivery date: {collected.deliveryDate}</>}
           </p>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button className="k-btn k-btn-secondary" onClick={() => setStep('address')} style={{ flex: 1 }}>Back</button>
-            <button className="k-btn k-btn-primary" onClick={placeOrder} disabled={placingOrder} style={{ flex: 2 }}>
-              {placingOrder ? 'Placing order…' : 'Place order'}
-            </button>
-          </div>
         </div>
       )}
+
+      <button className="k-btn k-btn-primary" style={{ width: '100%', padding: '12px 0' }} onClick={continueInChat}>
+        {address ? 'Continue checkout in chat' : 'Start checkout in chat'}
+      </button>
     </div>
   );
 }

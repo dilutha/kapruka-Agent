@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { toInputJson } from '../../../common/utils/json.util';
 
 export interface CachedProduct {
   id: string;
@@ -72,7 +73,7 @@ export class ProductCacheRepository {
             isAvailable: product.isAvailable,
             imageUrls: product.imageUrls,
             tags: product.tags ?? [],
-            rawData: product as unknown as Prisma.InputJsonValue,
+            rawData: toInputJson(product),
             expiresAt,
           },
           update: {
@@ -87,7 +88,7 @@ export class ProductCacheRepository {
             isAvailable: product.isAvailable,
             imageUrls: product.imageUrls,
             tags: product.tags ?? [],
-            rawData: product as unknown as Prisma.InputJsonValue,
+            rawData: toInputJson(product),
             fetchedAt: new Date(),
             expiresAt,
           },

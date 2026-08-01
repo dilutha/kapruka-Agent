@@ -3,6 +3,8 @@ import { useRef, useCallback, KeyboardEvent, useState } from 'react';
 import { useVoice } from '@/hooks/useVoice';
 import { useKaprukStore } from '@/stores/kapruk.store';
 
+const IMAGE_UPLOAD_HINT = 'Image search is coming soon';
+
 interface Props {
   onSend: (content: string) => void;
   disabled?: boolean;
@@ -11,6 +13,7 @@ interface Props {
 export function ChatInput({ onSend, disabled }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState('');
+  const [showImageHint, setShowImageHint] = useState(false);
   const language = useKaprukStore(s => s.language);
   const { state: voiceState, transcript, startListening, stopListening } = useVoice();
 
@@ -63,7 +66,35 @@ export function ChatInput({ onSend, disabled }: Props) {
             fontSize: 14, lineHeight: 1.5, color: 'var(--k-color-text)',
           }}
         />
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, position: 'relative' }}>
+          <button
+            onClick={() => {
+              setShowImageHint(true);
+              setTimeout(() => setShowImageHint(false), 1800);
+            }}
+            aria-label="Upload image (coming soon)"
+            title={IMAGE_UPLOAD_HINT}
+            style={{
+              width: 32, height: 32, borderRadius: '50%',
+              border: '1px solid var(--k-color-border-2)', background: 'transparent',
+              cursor: 'pointer', display: 'grid', placeItems: 'center', fontSize: 15,
+              color: 'var(--k-color-text-2)',
+            }}
+          >
+            🖼️
+          </button>
+          {showImageHint && (
+            <div
+              role="status"
+              style={{
+                position: 'absolute', bottom: '120%', left: 0, whiteSpace: 'nowrap',
+                background: 'var(--k-color-text)', color: 'var(--k-color-bg)',
+                fontSize: 11, padding: '5px 9px', borderRadius: 6, boxShadow: 'var(--k-shadow-md)',
+              }}
+            >
+              {IMAGE_UPLOAD_HINT}
+            </div>
+          )}
           <button
             onClick={voiceState === 'listening' ? stopListening : startListening}
             style={{

@@ -13,15 +13,11 @@
  *  7. Secrets         — Environment variables only, never in code
  */
 
-import {
-  Injectable,
-  NestMiddleware,
-  Logger,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { NextFunction, Request, Response } from 'express';
+import { Request } from 'express';
 import helmet from 'helmet';
-import { rateLimit } from 'express-rate-limit';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import { createClient } from 'redis';
 import { z } from 'zod';
@@ -33,26 +29,31 @@ export function buildHelmetConfig() {
   return helmet({
     contentSecurityPolicy: {
       directives: {
-        defaultSrc:     ["'self'"],
-        scriptSrc:      ["'self'", "'strict-dynamic'"],
-        styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-        fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
-        imgSrc:         ["'self'", 'data:', 'https://*.kapruka.com', 'https://cdn.kapruka.com'],
-        connectSrc:     ["'self'", 'https://api.kapruka.com', 'https://clerk.com'],
-        mediaSrc:       ["'self'", 'blob:'],       // For TTS audio playback
-        workerSrc:      ["'self'", 'blob:'],       // For voice activity detection worklet
-        frameSrc:       ["'none'"],
-        objectSrc:      ["'none'"],
-        baseUri:        ["'self'"],
-        formAction:     ["'self'"],
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'strict-dynamic'"],
+        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+        imgSrc: [
+          "'self'",
+          'data:',
+          'https://*.kapruka.com',
+          'https://cdn.kapruka.com',
+        ],
+        connectSrc: ["'self'", 'https://api.kapruka.com', 'https://clerk.com'],
+        mediaSrc: ["'self'", 'blob:'], // For TTS audio playback
+        workerSrc: ["'self'", 'blob:'], // For voice activity detection worklet
+        frameSrc: ["'none'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
         upgradeInsecureRequests: [],
       },
     },
-    crossOriginEmbedderPolicy: false,   // Required for SharedArrayBuffer (voice worklet)
+    crossOriginEmbedderPolicy: false, // Required for SharedArrayBuffer (voice worklet)
     hsts: {
-      maxAge:            63_072_000,    // 2 years
+      maxAge: 63_072_000, // 2 years
       includeSubDomains: true,
-      preload:           true,
+      preload: true,
     },
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   });
@@ -62,7 +63,10 @@ export function buildHelmetConfig() {
 
 export function buildCorsConfig(allowedOrigins: string[]) {
   return {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
       // Allow requests with no origin (server-to-server, health checks)
       if (!origin) return callback(null, true);
 
@@ -72,78 +76,106 @@ export function buildCorsConfig(allowedOrigins: string[]) {
         callback(new Error(`CORS: Origin ${origin} not allowed`));
       }
     },
-    methods:            ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders:     ['Content-Type', 'Authorization', 'X-Guest-Token', 'X-Request-ID'],
-    exposedHeaders:     ['X-Request-ID', 'X-RateLimit-Remaining'],
-    credentials:        true,
-    maxAge:             86_400,         // 24h preflight cache
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Guest-Token',
+      'X-Request-ID',
+    ],
+    exposedHeaders: ['X-Guest-Token', 'X-Request-ID', 'X-RateLimit-Remaining'],
+    credentials: true,
+    maxAge: 86_400, // 24h preflight cache
   };
 }
 
 // ─── 3. Rate Limiting ─────────────────────────────────────────────────────────
 
+/**
+ * Falls back to the client IP for unauthenticated callers. Always routes the
+ * IP itself through `ipKeyGenerator()` rather than interpolating `req.ip`
+ * directly — express-rate-limit otherwise can't normalize IPv6 addresses to
+ * a subnet, which both defeats per-client limiting for IPv6 callers (each
+ * request can arrive from a different address within the same /64) and
+ * trips its own `ERR_ERL_KEY_GEN_IPV6` validation warning.
+ */
+function ipFallbackKey(req: Request): string {
+  return ipKeyGenerator(req.ip ?? 'unknown');
+}
+
 export function buildRateLimiters(redisUrl: string) {
   const redisClient = createClient({ url: redisUrl });
   redisClient.connect().catch(console.error);
 
-  const store = new RedisStore({
-    sendCommand: (...args: string[]) => redisClient.sendCommand(args),
-  });
+  // Each limiter needs its OWN RedisStore instance — express-rate-limit
+  // rejects a shared store (`ERR_ERL_STORE_REUSE`) because every store
+  // instance tracks its own request-counting state internally. The
+  // underlying Redis *connection* is still shared (redisClient); only the
+  // Store wrapper — and its key prefix, so the four limiters' counters don't
+  // collide on the same Redis keys — is created fresh per limiter.
+  const createStore = (prefix: string) =>
+    new RedisStore({
+      prefix,
+      sendCommand: (...args: string[]) => redisClient.sendCommand(args),
+    });
 
   return {
     // Global API rate limit
     global: rateLimit({
-      windowMs:         60_000,          // 1 minute window
-      max:              120,             // 120 requests per minute per IP
-      standardHeaders:  'draft-7',
-      legacyHeaders:    false,
-      store,
-      keyGenerator:     (req) => req.ip ?? 'unknown',
-      skip:             (req) => req.path === '/health',
+      windowMs: 60_000, // 1 minute window
+      max: 120, // 120 requests per minute per IP
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      store: createStore('rl:global:'),
+      keyGenerator: ipFallbackKey,
+      skip: (req) => req.path === '/health',
       message: {
-        statusCode:     429,
-        error:          'Too Many Requests',
-        message:        'Rate limit exceeded. Please wait before trying again.',
+        statusCode: 429,
+        error: 'Too Many Requests',
+        message: 'Rate limit exceeded. Please wait before trying again.',
       },
     }),
 
     // Chat endpoint — stricter limit to prevent abuse + cost control
     chat: rateLimit({
-      windowMs:         60_000,
-      max:              30,              // 30 messages per minute per user
-      store,
-      keyGenerator:     (req: Request) => {
-        const userId = (req as any).user?.id ?? (req as any).guestUser?.id;
-        return userId ? `chat:user:${userId}` : `chat:ip:${req.ip}`;
+      windowMs: 60_000,
+      max: 30, // 30 messages per minute per user
+      store: createStore('rl:chat:'),
+      keyGenerator: (req: Request) => {
+        const request = req as RequestWithUser;
+        const userId = request.user?.id ?? request.guestUser?.id;
+        return userId ? `user:${userId}` : `ip:${ipFallbackKey(req)}`;
       },
       message: {
-        statusCode:     429,
-        error:          'Chat Rate Limited',
-        message:        'Too many messages. Please wait a moment before sending another.',
+        statusCode: 429,
+        error: 'Chat Rate Limited',
+        message:
+          'Too many messages. Please wait a moment before sending another.',
       },
     }),
 
     // Auth endpoints — very strict to prevent brute force
     auth: rateLimit({
-      windowMs:         15 * 60_000,    // 15 minutes
-      max:              10,
-      store,
-      keyGenerator:     (req) => req.ip ?? 'unknown',
+      windowMs: 15 * 60_000, // 15 minutes
+      max: 10,
+      store: createStore('rl:auth:'),
+      keyGenerator: ipFallbackKey,
       message: {
-        statusCode:     429,
-        error:          'Auth Rate Limited',
-        message:        'Too many authentication attempts. Please try again in 15 minutes.',
+        statusCode: 429,
+        error: 'Auth Rate Limited',
+        message:
+          'Too many authentication attempts. Please try again in 15 minutes.',
       },
     }),
 
     // Voice transcription — expensive API call, limit aggressively
     voice: rateLimit({
-      windowMs:         60_000,
-      max:              10,
-      store,
-      keyGenerator:     (req: Request) => {
-        const userId = (req as any).user?.id;
-        return userId ? `voice:${userId}` : `voice:ip:${req.ip}`;
+      windowMs: 60_000,
+      max: 10,
+      store: createStore('rl:voice:'),
+      keyGenerator: (req: Request) => {
+        const userId = (req as RequestWithUser).user?.id;
+        return userId ? `user:${userId}` : `ip:${ipFallbackKey(req)}`;
       },
     }),
   };
@@ -152,6 +184,7 @@ export function buildRateLimiters(redisUrl: string) {
 // ─── 4. Guest Session Token Strategy ─────────────────────────────────────────
 
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { RequestWithUser } from '../../modules/auth/interfaces/request-with-user.interface';
 
 @Injectable()
 export class GuestTokenService {
@@ -169,12 +202,12 @@ export class GuestTokenService {
    * The HMAC prevents forgery — guests can't manufacture valid tokens.
    */
   generate(): string {
-    const id       = randomBytes(16).toString('hex');
-    const ts       = Date.now().toString(36);
-    const payload  = `${id}.${ts}`;
-    const mac      = createHmac('sha256', this.HMAC_KEY)
-                       .update(payload)
-                       .digest('hex');
+    const id = randomBytes(16).toString('hex');
+    const ts = Date.now().toString(36);
+    const payload = `${id}.${ts}`;
+    const mac = createHmac('sha256', this.HMAC_KEY)
+      .update(payload)
+      .digest('hex');
     return `${payload}.${mac}`;
   }
 
@@ -187,21 +220,23 @@ export class GuestTokenService {
     if (parts.length !== 3) return { valid: false };
 
     const [id, tsHex, providedMac] = parts;
-    const payload  = `${id}.${tsHex}`;
+    const payload = `${id}.${tsHex}`;
     const expected = createHmac('sha256', this.HMAC_KEY)
-                       .update(payload)
-                       .digest('hex');
+      .update(payload)
+      .digest('hex');
 
     const expectedBuf = Buffer.from(expected);
-    const providedBuf = Buffer.from(providedMac.padEnd(expected.length, '0').slice(0, expected.length));
+    const providedBuf = Buffer.from(
+      providedMac.padEnd(expected.length, '0').slice(0, expected.length),
+    );
 
     // Timing-safe comparison
     if (expectedBuf.length !== providedBuf.length) return { valid: false };
     if (!timingSafeEqual(expectedBuf, providedBuf)) return { valid: false };
 
     // Check expiry
-    const createdAt  = parseInt(tsHex, 36);
-    const expiryMs   = this.TOKEN_EXPIRY_HOURS * 3_600_000;
+    const createdAt = parseInt(tsHex, 36);
+    const expiryMs = this.TOKEN_EXPIRY_HOURS * 3_600_000;
     if (!Number.isFinite(createdAt) || createdAt > Date.now() + 60_000) {
       return { valid: false };
     }
@@ -235,18 +270,38 @@ export const CheckoutAddressSchema = z.object({
   addressLine1: z.string().min(5).max(200),
   city: z.string().min(2).max(100),
   district: z.enum([
-    'Colombo', 'Gampaha', 'Kalutara', 'Kandy', 'Matale',
-    'Nuwara Eliya', 'Galle', 'Matara', 'Hambantota', 'Jaffna',
-    'Kilinochchi', 'Mannar', 'Vavuniya', 'Mullaitivu', 'Batticaloa',
-    'Ampara', 'Trincomalee', 'Kurunegala', 'Puttalam', 'Anuradhapura',
-    'Polonnaruwa', 'Badulla', 'Monaragala', 'Ratnapura', 'Kegalle',
+    'Colombo',
+    'Gampaha',
+    'Kalutara',
+    'Kandy',
+    'Matale',
+    'Nuwara Eliya',
+    'Galle',
+    'Matara',
+    'Hambantota',
+    'Jaffna',
+    'Kilinochchi',
+    'Mannar',
+    'Vavuniya',
+    'Mullaitivu',
+    'Batticaloa',
+    'Ampara',
+    'Trincomalee',
+    'Kurunegala',
+    'Puttalam',
+    'Anuradhapura',
+    'Polonnaruwa',
+    'Badulla',
+    'Monaragala',
+    'Ratnapura',
+    'Kegalle',
   ]),
 });
 
 export const GiftMessageSchema = z.object({
-  fromName:    z.string().min(1).max(60),
-  toName:      z.string().min(1).max(60),
-  message:     z.string().min(1).max(150),
+  fromName: z.string().min(1).max(60),
+  toName: z.string().min(1).max(60),
+  message: z.string().min(1).max(150),
   isAnonymous: z.boolean().default(false),
 });
 
@@ -259,30 +314,30 @@ export const GiftMessageSchema = z.object({
  */
 export const RequiredSecretsSchema = z.object({
   // Database
-  DATABASE_URL:             z.string().url(),
-  DIRECT_URL:               z.string().url(),
+  DATABASE_URL: z.string().url(),
+  DIRECT_URL: z.string().url(),
 
   // Auth
-  CLERK_SECRET_KEY:         z.string().startsWith('sk_'),
-  CLERK_PUBLISHABLE_KEY:    z.string().startsWith('pk_'),
-  GUEST_TOKEN_SECRET:       z.string().length(64), // 32 bytes hex
+  CLERK_SECRET_KEY: z.string().startsWith('sk_'),
+  CLERK_PUBLISHABLE_KEY: z.string().startsWith('pk_'),
+  GUEST_TOKEN_SECRET: z.string().length(64), // 32 bytes hex
 
   // AI
-  OPENAI_API_KEY:           z.string().startsWith('sk-'),
+  GEMINI_API_KEY: z.string().min(20),
 
   // Redis
-  REDIS_URL:                z.string(),
+  REDIS_URL: z.string(),
 
   // MCP
-  KAPRUKA_MCP_SERVER_URL:   z.string().url(),
+  KAPRUKA_MCP_SERVER_URL: z.string().url(),
 
   // App
-  NEXTJS_URL:               z.string().url(),
-  CORS_ALLOWED_ORIGINS:     z.string(), // Comma-separated URLs
+  NEXTJS_URL: z.string().url(),
+  CORS_ALLOWED_ORIGINS: z.string(), // Comma-separated URLs
 
   // Optional but recommended
-  SENTRY_DSN:               z.string().url().optional(),
-  POSTHOG_KEY:              z.string().optional(),
+  SENTRY_DSN: z.string().url().optional(),
+  POSTHOG_KEY: z.string().optional(),
 });
 
 export type RequiredSecrets = z.infer<typeof RequiredSecretsSchema>;

@@ -3,6 +3,6 @@ import { McpClientService } from './mcp-client.service';
 
 @Module({
   providers: [McpClientService],
-  exports:   [McpClientService],
+  exports: [McpClientService],
 })
 export class McpModule {}
